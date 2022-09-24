@@ -1,3 +1,5 @@
+.gitignore
+
 .idea/
 rank_0/
 split_coco.py
