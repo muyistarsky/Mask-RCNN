@@ -485,8 +485,12 @@ def coco_eval(result_files, result_types, coco, max_dets=(100, 300, 1000), singl
     return summary_metrics
 ```
 
-## 模型训练及评估
+## 模型训练、评估及结果可视化
+由于回调形式的模型训练不便于定位错误位置，因此本案例实现采用for循环的方式进行网络训练。for循环形式的训练整体上和pytorch差不多，但是需要注意的是mindspore将优化器进行了使用上的简化，不再需要像pytorch一样手动调用step，而是通过ops.depend将优化器的归零和更新进行了包装。
 
+评估时，会对test_dir目录下的所有图片进行评估，若需要修改评估对象，可以修改config中的test_dir，同时也需要修改test_annotations中的标注文件。
+
+结果可视化需要在评估之后才能调用，该步骤依赖于评估生成的结果文件。
 ```
 def train():
     rank = 0
@@ -496,32 +500,45 @@ def train():
     if rank == 0 and not os.path.exists(mindrecord_file):
         create_mindrecord_dir(prefix, mindrecord_dir, mindrecord_file)
     dataset = create_maskrcnn_dataset(mindrecord_file, batch_size=config.batch_size, device_num=1, rank_id=0)
-    dataset_size = dataset.get_dataset_size()
     net = MaskRCNN(config)
     net = net.set_train()
     loss = LossNet()
     lr = Tensor(0.0001, mstype.float32)
     opt = Momentum(params=net.trainable_params(), learning_rate=lr, momentum=0.9)
-    net_with_loss = WithLossCell(net, loss)
-    net = TrainOneStepCell(net_with_loss, opt, sens=1024)
-    time_cb = TimeMonitor(data_size=dataset_size)
-    loss_cb = LossCallBack(rank_id=rank)
-    cb = [time_cb, loss_cb]
-    ckptconfig = CheckpointConfig(save_checkpoint_steps=1 * dataset_size,
-                                  keep_checkpoint_max=12)
-    save_checkpoint_path = os.path.join('./', 'ckpt_' + str(rank) + '/')
-    ckpoint_cb = ModelCheckpoint(prefix='mask_rcnn', directory=save_checkpoint_path, config=ckptconfig)
-    cb += [ckpoint_cb]
-    model = Model(net)
-    model.train(1, dataset, callbacks=cb, dataset_sink_mode=False)
+
+    def forward_fn(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask):
+        output = net(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask)
+        l = loss(*output)
+        return l
+    grad_fn = ops.value_and_grad(forward_fn, None, opt.parameters, has_aux=False)
+
+    def train_step(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask):
+        (loss), grads = grad_fn(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask)
+        loss = ops.depend(loss, opt(grads))
+        return loss
+    for epoch in range(config.epoch_size):
+        step = 0
+        for data in dataset.create_dict_iterator(output_numpy=True, num_epochs=1):
+            img_data = data['image']
+            img_metas = data['image_shape']
+            gt_bboxes = data['box']
+            gt_labels = data['label']
+            gt_num = data['valid_num']
+            gt_mask = data["mask"]
+            l = train_step(Tensor(img_data, dtype=mstype.float32), Tensor(img_metas, dtype=mstype.float32),
+                              Tensor(gt_bboxes, dtype=mstype.float32), Tensor(gt_labels, dtype=mstype.float32),
+                              Tensor(gt_num, dtype=mstype.float32), Tensor(gt_mask, dtype=mstype.float32))
+            print("epoch:", epoch, " step:", step, " loss:", l)
+            step += 1
+    ms.save_checkpoint(net, "./ckpt_" + str(rank) + "/mask_rcnn.ckpt")
     print('---------train done-----------')
 
 
 def eval_():
     device_target = config.device_target
-    context.set_context(mode=context.GRAPH_MODE, device_target=device_target, device_id=int(os.getenv('DEVICE_ID', '0')))
+    context.set_context(mode=context.GRAPH_MODE, device_target=device_target)
 
-    config.mindrecord_dir = os.path.join(config.coco_root, config.mindrecord_dir)
+    config.mindrecord_dir = os.path.join(config.coco_root, config.test_dir)
     prefix = "MaskRcnn_eval.mindrecord"
     mindrecord_dir = config.mindrecord_dir
     mindrecord_file = os.path.join(mindrecord_dir, prefix)
@@ -540,14 +557,14 @@ def eval_():
     ds = create_maskrcnn_dataset(mindrecord_file, batch_size=config.test_batch_size, is_training=False)
 
     net = MaskRCNN(config)
-    param_dict = load_checkpoint('./ckpt_0/mask_rcnn-1_5.ckpt')
+    param_dict = load_checkpoint('./ckpt_0/mask_rcnn.ckpt')
     load_param_into_net(net, param_dict)
     net.set_train(False)
 
     eval_iter = 0
     total = ds.get_dataset_size()
     outputs = []
-    dataset_coco = COCO('annotations/instances_val2017.json')
+    dataset_coco = COCO('test_annotations/instances_val2017.json')
 
     print("\n========================================\n")
     print("total images num: ", total)
@@ -565,8 +582,8 @@ def eval_():
         start = time.time()
 
         # run net
-        output = net(Tensor(img_data), Tensor(img_metas), Tensor(gt_bboxes), Tensor(gt_labels), Tensor(gt_num),
-                     Tensor(gt_mask))
+        output = net(Tensor(img_data, dtype=mstype.float32), Tensor(img_metas, dtype=mstype.float32), Tensor(gt_bboxes, dtype=mstype.float32),
+                     Tensor(gt_labels, dtype=mstype.float32), Tensor(gt_num, dtype=mstype.float32), Tensor(gt_mask, dtype=mstype.float32))
         end = time.time()
         print("Iter {} cost time {}".format(eval_iter, end - start))
 
@@ -575,6 +592,8 @@ def eval_():
         all_label = output[1]
         all_mask = output[2]
         all_mask_fb = output[3]
+        print(all_bbox.shape)
+        print(all_mask.shape, np.sum(all_mask.asnumpy()[0]))
 
         for j in range(config.test_batch_size):
             all_bbox_squee = np.squeeze(all_bbox.asnumpy()[j, :, :])
@@ -602,13 +621,46 @@ def eval_():
 
     eval_types = ["bbox", "segm"]
     result_files = results2json(dataset_coco, outputs, "./results.pkl")
-    coco_eval(result_files, eval_types, dataset_coco, single_result=False)
+    metrics = coco_eval(result_files, eval_types, dataset_coco, single_result=False)
+    print(metrics)
 
-    print("ckpt_path=", '.')
+
+def get_eval_result(bbox_file, segm_file, ann_file, img_name, img_path):
+    """ Get metrics result according to the annotation file and result file"""
+    with open(bbox_file) as b, open(segm_file) as s:
+        bboxes = json.load(b)
+        segms = json.load(s)
+        data_coco = COCO(ann_file)
+        img_id = -1
+        for k, v in data_coco.imgs.items():
+            if v['file_name'] == img_name:
+                img_id = k
+        img = cv2.imread(img_path + "/" + img_name)
+        img1 = img.copy()
+        for d in bboxes:
+            if d['image_id'] == img_id:
+                box = d['bbox']
+                x, y, w, h = box
+                a = (int(x), int(y))
+                b = (int(x + w), int(y + h))
+                img1 = cv2.rectangle(img1, a, b, (0, 255, 255), 2)
+                img1 = cv2.putText(img1, "{} {:.3f}".format(config.coco_classes[int(d['category_id'])], d['score']),
+                                   (b[0], a[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.imshow("detect", img1)
+        cv2.waitKey()
+        color = (0, 0.6, 0.6)
+        for d in segms:
+            if d['image_id'] == img_id:
+                mask = maskUtils.decode(d['segmentation'])
+                mask = np.where(mask > 0, 1, 0).astype(np.uint8)
+                for c in range(3):
+                    img[:, :, c] = np.where(mask == 1, img[:, :, c] * 0.5 + 0.5 * color[c] * 255, img[:, :, c])
+        cv2.imshow("mask", img)
+        cv2.waitKey()
 ```
 
 ## 本案例脚本的使用方式
-在jupyter模式下，直接注释掉3560-3562，直接将"train"/"eval"/"infer"赋给mode即可运行训练/评估/推理。在.py模式下可以通过命令行参数--mode传入不同的字符串从而选择运行不同的模型。
+通过将"train"/"eval"/"infer"赋给mode即可运行训练/评估/推理。eval会对test_img中的所有图片进行指标评估，然后将标注框和分割矩阵存放到根目录下的两个json文件中。infer则会根据eval的结果，对指定图片的检测和分割进行可视化展示。
 
 所有的配置参数均在config类中，可以根据需要进行修改。
 

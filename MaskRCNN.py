@@ -23,6 +23,9 @@ import mindspore.dataset as de
 from mindspore.mindrecord import FileWriter
 import mindspore.dataset.vision as vision
 from mindspore import ParameterTuple
+import mindspore.ops as ops
+import mindspore as ms
+import matplotlib.pyplot as plt
 from mindspore.train import Model
 from mindspore.train.callback import Callback
 from mindspore.train.callback import CheckpointConfig, ModelCheckpoint, TimeMonitor
@@ -264,7 +267,7 @@ class FeatPyramidNeck(nn.Cell):
         super(FeatPyramidNeck, self).__init__()
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
+            self.cast_type = mstype.float32
         else:
             self.cast_type = mstype.float32
 
@@ -341,8 +344,8 @@ class BboxAssignSample(nn.Cell):
         cfg = config
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
-            self.np_cast_type = np.float16
+            self.cast_type = mstype.float32
+            self.np_cast_type = np.float32
         else:
             self.cast_type = mstype.float32
             self.np_cast_type = np.float32
@@ -549,8 +552,8 @@ class RPN(nn.Cell):
             self.platform_dtype = np.float32
             self.platform_mstype = mstype.float32
         else:
-            self.platform_dtype = np.float16
-            self.platform_mstype = mstype.float16
+            self.platform_dtype = np.float32
+            self.platform_mstype = mstype.float32
         self.num_bboxes = cfg_rpn.num_bboxes
         self.slice_index = ()
         self.feature_anchor_shape = ()
@@ -795,8 +798,8 @@ class Proposal(nn.Cell):
         cfg = config
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
-            self.np_cast_type = np.float16
+            self.cast_type = mstype.float32
+            self.np_cast_type = np.float32
         else:
             self.cast_type = mstype.float32
             self.np_cast_type = np.float32
@@ -967,8 +970,8 @@ class BboxAssignSampleForRcnn(nn.Cell):
         cfg = config
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
-            self.np_cast_type = np.float16
+            self.cast_type = mstype.float32
+            self.np_cast_type = np.float32
         else:
             self.cast_type = mstype.float32
             self.np_cast_type = np.float32
@@ -1177,7 +1180,7 @@ class FpnCls(nn.Cell):
         super(FpnCls, self).__init__()
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
+            self.cast_type = mstype.float32
         else:
             self.cast_type = mstype.float32
 
@@ -1244,8 +1247,8 @@ class RcnnCls(nn.Cell):
         cfg = config
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
-            self.np_cast_type = np.float16
+            self.cast_type = mstype.float32
+            self.np_cast_type = np.float32
         else:
             self.cast_type = mstype.float32
             self.np_cast_type = np.float32
@@ -1336,7 +1339,7 @@ class FpnMask(nn.Cell):
         super(FpnMask, self).__init__()
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
+            self.cast_type = mstype.float32
         else:
             self.cast_type = mstype.float32
 
@@ -1413,8 +1416,8 @@ class RcnnMask(nn.Cell):
         cfg = config
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
-            self.np_cast_type = np.float16
+            self.cast_type = mstype.float32
+            self.np_cast_type = np.float32
         else:
             self.cast_type = mstype.float32
             self.np_cast_type = np.float32
@@ -1734,8 +1737,8 @@ class MaskRCNN(nn.Cell):
         super(MaskRCNN, self).__init__()
 
         if context.get_context("device_target") == "Ascend":
-            self.cast_type = mstype.float16
-            self.np_cast_type = np.float16
+            self.cast_type = mstype.float32
+            self.np_cast_type = np.float32
         else:
             self.cast_type = mstype.float32
             self.np_cast_type = np.float32
@@ -2480,7 +2483,7 @@ class LossNet(nn.Cell):
     """MaskRcnn loss method"""
 
     def construct(self, x1, x2, x3, x4, x5, x6, x7):
-        return x1 + x2
+        return x1 + x2 + x3 + x4 + x5 + x6 + x7
 
 
 class WithLossCell(nn.Cell):
@@ -2703,7 +2706,7 @@ def transpose_column(img, img_shape, gt_bboxes, gt_label, gt_num, gt_mask):
     if context.get_context("device_target") == "CPU" or context.get_context("device_target") == "GPU":
         platform_dtype = np.float32
     else:
-        platform_dtype = np.float16
+        platform_dtype = np.float32
 
     img_data = img.transpose(2, 0, 1).copy()
     img_data = img_data.astype(platform_dtype)
@@ -3258,58 +3261,38 @@ def get_resize_ratio(img_size):
     return resize_ratio
 
 
-def get_eval_result(ann_file, img_path, result_path):
+def get_eval_result(bbox_file, segm_file, ann_file, img_name, img_path):
     """ Get metrics result according to the annotation file and result file"""
-    max_num = 128
-    result_path = result_path
-    outputs = []
-
-    dataset_coco = COCO(ann_file)
-    img_ids = dataset_coco.getImgIds()
-    result_file = result_path + ''
-
-    for img_id in img_ids:
-        file_id = str(img_id).zfill(12)
-        file = os.path.join(img_path, file_id + ".jpg")
-        img_size = get_img_size(file)
-        resize_ratio = get_resize_ratio(img_size)
-
-        img_metas = np.array([img_size[1], img_size[0]] + [resize_ratio, resize_ratio])
-
-        bbox_result_file = os.path.join(result_path, file_id + "_0.bin")
-        label_result_file = os.path.join(result_path, file_id + "_1.bin")
-        mask_result_file = os.path.join(result_path, file_id + "_2.bin")
-        mask_fb_result_file = os.path.join(result_path, file_id + "_3.bin")
-
-        all_bbox = np.fromfile(bbox_result_file, dtype=np.float16).reshape(80000, 5)
-        all_label = np.fromfile(label_result_file, dtype=np.int32).reshape(80000, 1)
-        all_mask = np.fromfile(mask_result_file, dtype=np.bool_).reshape(80000, 1)
-        all_mask_fb = np.fromfile(mask_fb_result_file, dtype=np.float16).reshape(80000, 28, 28)
-
-        all_bbox_squee = np.squeeze(all_bbox)
-        all_label_squee = np.squeeze(all_label)
-        all_mask_squee = np.squeeze(all_mask)
-        all_mask_fb_squee = np.squeeze(all_mask_fb)
-
-        all_bboxes_tmp_mask = all_bbox_squee[all_mask_squee, :]
-        all_labels_tmp_mask = all_label_squee[all_mask_squee]
-        all_mask_fb_tmp_mask = all_mask_fb_squee[all_mask_squee, :, :]
-
-        if all_bboxes_tmp_mask.shape[0] > max_num:
-            inds = np.argsort(-all_bboxes_tmp_mask[:, -1])
-            inds = inds[:max_num]
-            all_bboxes_tmp_mask = all_bboxes_tmp_mask[inds]
-            all_labels_tmp_mask = all_labels_tmp_mask[inds]
-            all_mask_fb_tmp_mask = all_mask_fb_tmp_mask[inds]
-
-        bbox_results = bbox2result_1image(all_bboxes_tmp_mask, all_labels_tmp_mask, config.num_classes)
-        segm_results = get_seg_masks(all_mask_fb_tmp_mask, all_bboxes_tmp_mask, all_labels_tmp_mask, img_metas,
-                                     True, config.num_classes)
-        outputs.append((bbox_results, segm_results))
-
-    eval_types = ["bbox", "segm"]
-    result_files = results2json(dataset_coco, outputs, "./results.pkl")
-    coco_eval(result_files, eval_types, dataset_coco, single_result=False)
+    with open(bbox_file) as b, open(segm_file) as s:
+        bboxes = json.load(b)
+        segms = json.load(s)
+        data_coco = COCO(ann_file)
+        img_id = -1
+        for k, v in data_coco.imgs.items():
+            if v['file_name'] == img_name:
+                img_id = k
+        img = cv2.imread(img_path + "/" + img_name)
+        img1 = img.copy()
+        for d in bboxes:
+            if d['image_id'] == img_id:
+                box = d['bbox']
+                x, y, w, h = box
+                a = (int(x), int(y))
+                b = (int(x + w), int(y + h))
+                img1 = cv2.rectangle(img1, a, b, (0, 255, 255), 2)
+                img1 = cv2.putText(img1, "{} {:.3f}".format(config.coco_classes[int(d['category_id'])], d['score']),
+                                   (b[0], a[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.imshow("detect", img1)
+        cv2.waitKey()
+        color = (0, 0.6, 0.6)
+        for d in segms:
+            if d['image_id'] == img_id:
+                mask = maskUtils.decode(d['segmentation'])
+                mask = np.where(mask > 0, 1, 0).astype(np.uint8)
+                for c in range(3):
+                    img[:, :, c] = np.where(mask == 1, img[:, :, c] * 0.5 + 0.5 * color[c] * 255, img[:, :, c])
+        cv2.imshow("mask", img)
+        cv2.waitKey()
 
 
 class config:
@@ -3356,7 +3339,7 @@ class config:
     rpn_nms_pre = 1000
     rpn_nms_post = 1000
     rpn_max_num = 1000
-    rpn_nms_thr = 0.7
+    rpn_nms_thr = 0.5
     rpn_min_bbox_min_size = 0
     # bbox assign sampler
     neg_iou_thr = 0.3
@@ -3388,8 +3371,8 @@ class config:
     activate_num_classes = 2
     use_sigmoid_cls = True
     # test proposal
-    test_score_thr = 0.05
-    test_iou_thr = 0.5
+    test_score_thr = 0.002
+    test_iou_thr = 0.3
     test_max_per_img = 100
     test_batch_size = 1
     rpn_head_use_sigmoid = True
@@ -3406,14 +3389,15 @@ class config:
     roi_align_finest_scale = 56
     roi_sample_num = 640
     # train
-    batch_size = 2
+    batch_size = 8
     loss_scale = 1024
     momentum = 0.91
     weight_decay = 0.0001  # 1e-4
     pretrain_epoch_size = 0
-    epoch_size = 1
+    epoch_size = 20
 
     num_classes = 81
+    test_dir = 'test_img'
     mindrecord_dir = 'val2017'
     instance_set = "annotations/instances_{}.json"
     coco_root = '.'
@@ -3444,32 +3428,45 @@ def train():
     if rank == 0 and not os.path.exists(mindrecord_file):
         create_mindrecord_dir(prefix, mindrecord_dir, mindrecord_file)
     dataset = create_maskrcnn_dataset(mindrecord_file, batch_size=config.batch_size, device_num=1, rank_id=0)
-    dataset_size = dataset.get_dataset_size()
     net = MaskRCNN(config)
     net = net.set_train()
     loss = LossNet()
     lr = Tensor(0.0001, mstype.float32)
     opt = Momentum(params=net.trainable_params(), learning_rate=lr, momentum=0.9)
-    net_with_loss = WithLossCell(net, loss)
-    net = TrainOneStepCell(net_with_loss, opt, sens=1024)
-    time_cb = TimeMonitor(data_size=dataset_size)
-    loss_cb = LossCallBack(rank_id=rank)
-    cb = [time_cb, loss_cb]
-    ckptconfig = CheckpointConfig(save_checkpoint_steps=1 * dataset_size,
-                                  keep_checkpoint_max=12)
-    save_checkpoint_path = os.path.join('./', 'ckpt_' + str(rank) + '/')
-    ckpoint_cb = ModelCheckpoint(prefix='mask_rcnn', directory=save_checkpoint_path, config=ckptconfig)
-    cb += [ckpoint_cb]
-    model = Model(net)
-    model.train(1, dataset, callbacks=cb, dataset_sink_mode=False)
+
+    def forward_fn(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask):
+        output = net(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask)
+        l = loss(*output)
+        return l
+    grad_fn = ops.value_and_grad(forward_fn, None, opt.parameters, has_aux=False)
+
+    def train_step(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask):
+        (loss), grads = grad_fn(img_data, img_metas, gt_bboxes, gt_labels, gt_num, gt_mask)
+        loss = ops.depend(loss, opt(grads))
+        return loss
+    for epoch in range(config.epoch_size):
+        step = 0
+        for data in dataset.create_dict_iterator(output_numpy=True, num_epochs=1):
+            img_data = data['image']
+            img_metas = data['image_shape']
+            gt_bboxes = data['box']
+            gt_labels = data['label']
+            gt_num = data['valid_num']
+            gt_mask = data["mask"]
+            l = train_step(Tensor(img_data, dtype=mstype.float32), Tensor(img_metas, dtype=mstype.float32),
+                              Tensor(gt_bboxes, dtype=mstype.float32), Tensor(gt_labels, dtype=mstype.float32),
+                              Tensor(gt_num, dtype=mstype.float32), Tensor(gt_mask, dtype=mstype.float32))
+            print("epoch:", epoch, " step:", step, " loss:", l)
+            step += 1
+    ms.save_checkpoint(net, "./ckpt_" + str(rank) + "/mask_rcnn.ckpt")
     print('---------train done-----------')
 
 
 def eval_():
     device_target = config.device_target
-    context.set_context(mode=context.GRAPH_MODE, device_target=device_target, device_id=int(os.getenv('DEVICE_ID', '0')))
+    context.set_context(mode=context.GRAPH_MODE, device_target=device_target)
 
-    config.mindrecord_dir = os.path.join(config.coco_root, config.mindrecord_dir)
+    config.mindrecord_dir = os.path.join(config.coco_root, config.test_dir)
     prefix = "MaskRcnn_eval.mindrecord"
     mindrecord_dir = config.mindrecord_dir
     mindrecord_file = os.path.join(mindrecord_dir, prefix)
@@ -3488,14 +3485,14 @@ def eval_():
     ds = create_maskrcnn_dataset(mindrecord_file, batch_size=config.test_batch_size, is_training=False)
 
     net = MaskRCNN(config)
-    param_dict = load_checkpoint('./ckpt_0/mask_rcnn-1_5.ckpt')
+    param_dict = load_checkpoint('./ckpt_0/mask_rcnn.ckpt')
     load_param_into_net(net, param_dict)
     net.set_train(False)
 
     eval_iter = 0
     total = ds.get_dataset_size()
     outputs = []
-    dataset_coco = COCO('annotations/instances_val2017.json')
+    dataset_coco = COCO('test_annotations/instances_val2017.json')
 
     print("\n========================================\n")
     print("total images num: ", total)
@@ -3513,8 +3510,8 @@ def eval_():
         start = time.time()
 
         # run net
-        output = net(Tensor(img_data), Tensor(img_metas), Tensor(gt_bboxes), Tensor(gt_labels), Tensor(gt_num),
-                     Tensor(gt_mask))
+        output = net(Tensor(img_data, dtype=mstype.float32), Tensor(img_metas, dtype=mstype.float32), Tensor(gt_bboxes, dtype=mstype.float32),
+                     Tensor(gt_labels, dtype=mstype.float32), Tensor(gt_num, dtype=mstype.float32), Tensor(gt_mask, dtype=mstype.float32))
         end = time.time()
         print("Iter {} cost time {}".format(eval_iter, end - start))
 
@@ -3523,6 +3520,8 @@ def eval_():
         all_label = output[1]
         all_mask = output[2]
         all_mask_fb = output[3]
+        print(all_bbox.shape)
+        print(all_mask.shape, np.sum(all_mask.asnumpy()[0]))
 
         for j in range(config.test_batch_size):
             all_bbox_squee = np.squeeze(all_bbox.asnumpy()[j, :, :])
@@ -3550,20 +3549,15 @@ def eval_():
 
     eval_types = ["bbox", "segm"]
     result_files = results2json(dataset_coco, outputs, "./results.pkl")
-    coco_eval(result_files, eval_types, dataset_coco, single_result=False)
+    metrics = coco_eval(result_files, eval_types, dataset_coco, single_result=False)
+    print(metrics)
 
-    print("ckpt_path=", '.')
 
-
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', type=str, default='train', help='select running mode')
-    args = parser.parse_args()
-    mode = args.mode
-    if mode == 'train':
-        train()
-    elif mode == 'eval':
-        eval_()
-    elif mode == 'infer':
-        get_eval_result('annotations/instances_val2017.json', 'val2017/', '.')
+mode = 'infer'
+if mode == 'train':
+    train()
+elif mode == 'eval':
+    eval_()
+elif mode == 'infer':
+    get_eval_result('results.pkl.bbox.json', 'results.pkl.segm.json', "test_annotations/instances_val2017.json",
+                    '000000407646.jpg', 'test_img')

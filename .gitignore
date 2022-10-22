@@ -1,5 +1,8 @@
 .gitignore
 
 .idea/
+ckpt_0/
 rank_0/
 split_coco.py
+results.pkl.bbox.json
+results.pkl.segm.json
