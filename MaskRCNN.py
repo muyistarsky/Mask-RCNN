@@ -3553,7 +3553,7 @@ def eval_():
     print(metrics)
 
 
-mode = 'infer'
+mode = 'eval'
 if mode == 'train':
     train()
 elif mode == 'eval':
