@@ -30,6 +30,7 @@ from mindspore.train import Model
 from mindspore.train.callback import Callback
 from mindspore.train.callback import CheckpointConfig, ModelCheckpoint, TimeMonitor
 from mindspore.train.serialization import load_checkpoint, load_param_into_net
+import matplotlib.pyplot as plt
 
 np_cast_type = np.float32
 time_stamp_init = time.time()
@@ -3282,8 +3283,6 @@ def get_eval_result(bbox_file, segm_file, ann_file, img_name, img_path):
                 img1 = cv2.rectangle(img1, a, b, (0, 255, 255), 2)
                 img1 = cv2.putText(img1, "{} {:.3f}".format(config.coco_classes[int(d['category_id'])], d['score']),
                                    (b[0], a[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        cv2.imshow("detect", img1)
-        cv2.waitKey()
         color = (0, 0.6, 0.6)
         for d in segms:
             if d['image_id'] == img_id:
@@ -3291,8 +3290,14 @@ def get_eval_result(bbox_file, segm_file, ann_file, img_name, img_path):
                 mask = np.where(mask > 0, 1, 0).astype(np.uint8)
                 for c in range(3):
                     img[:, :, c] = np.where(mask == 1, img[:, :, c] * 0.5 + 0.5 * color[c] * 255, img[:, :, c])
-        cv2.imshow("mask", img)
-        cv2.waitKey()
+        plt.figure()
+        plt.subplot(121)
+        img1 = img1[:, :, ::-1]
+        plt.imshow(img1)
+        plt.subplot(122)
+        img = img[:, :, ::-1]
+        plt.imshow(img)
+        plt.show()
 
 
 class config:
@@ -3560,4 +3565,4 @@ elif mode == 'eval':
     eval_()
 elif mode == 'infer':
     get_eval_result('results.pkl.bbox.json', 'results.pkl.segm.json', "test_annotations/instances_val2017.json",
-                    '000000407646.jpg', 'test_img')
+                    '000000033759.jpg', 'test_img')
